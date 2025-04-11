@@ -1,5 +1,5 @@
 import sqlite3
-from telegram.ext import Application, MessageHandler, filters
+from telegram.ext import Application, MessageHandler, filters, CommandHandler
 import subprocess
 import logging
 import os
@@ -126,7 +126,7 @@ async def handle_message(update, context):
     save_to_db(sender_username, message_text)
 
     if message_text == TRIGGER_MESSAGE_STRM:
-        logger.info(f"触发条件满足: {message_text} (来自: @{sender_username})")
+        logger.info(f"触发普通消息: {message_text} (来自: @{sender_username})")
         await run_script(
             "/app/init4.sh",
             ["bash", "/app/init4.sh", SCRIPT_PARAM],
@@ -138,15 +138,31 @@ async def handle_message(update, context):
 
     elif message_text.startswith(TRIGGER_MESSAGE_TRANSFER):
         logger.info(f"检测到转存关键词: {message_text} (来自: @{sender_username})")
+        parts = message_text.split()
         share_link = extract_share_link(message_text)
         if not share_link:
             logger.error("未找到有效的天翼云盘分享链接")
             await send_limited_message(chat_id, "❌ 错误：请提供有效的天翼云盘分享链接！", context)
             return
+        
+        target_folder_name = ""
+        if len(parts) > 2:
+            target_folder_name = parts[2]
+            logger.info(f"指定目标文件夹名称: {target_folder_name}")
+        else:
+            default_folder_id = os.getenv("TARGET_FOLDER_ID", "-11")
+            logger.info(f"未指定文件夹，使用默认文件夹 ID: {default_folder_id}")
+        
         access_code = ""
+        script_args = ["python", "/app/create_task.py", "--share-link", share_link]
+        if access_code:
+            script_args.extend(["--access-code", access_code])
+        if target_folder_name:
+            script_args.extend(["--target-folder-name", target_folder_name])
+
         await run_script(
             "/app/create_task.py",
-            ["python", "/app/create_task.py", "--share-link", share_link] + (["--access-code", access_code] if access_code else []),
+            script_args,
             chat_id,
             context,
             "转存",
@@ -154,7 +170,7 @@ async def handle_message(update, context):
         )
 
     elif message_text == TRIGGER_MESSAGE_EXECUTE:
-        logger.info(f"触发条件满足: {message_text} (来自: @{sender_username})")
+        logger.info(f"触发普通消息: {message_text} (来自: @{sender_username})")
         await run_script(
             "/app/execute_tasks.py",
             ["python", "/app/execute_tasks.py"],
@@ -163,10 +179,91 @@ async def handle_message(update, context):
             "任务执行"
         )
 
+async def transfer_command(update, context):
+    chat_id = update.message.chat_id
+    sender_username = update.message.from_user.username if update.message.from_user.username else "未知用户"
+    args = context.args
+    
+    if chat_id != int(TARGET_CHAT_ID) or sender_username != TARGET_SENDER:
+        logger.info(f"命令 /transfer 不符合条件: Chat ID {chat_id} 或发送者 @{sender_username} 不匹配")
+        return
+    
+    logger.info(f"收到命令: /transfer {' '.join(args)} (来自: @{sender_username})")
+    if not args:
+        await send_limited_message(chat_id, "❌ 错误：请提供分享链接，例如 /transfer <链接> [目录]", context)
+        return
+    
+    share_link = extract_share_link(" ".join(args))
+    if not share_link:
+        await send_limited_message(chat_id, "❌ 错误：请提供有效的天翼云盘分享链接！", context)
+        return
+    
+    target_folder_name = args[1] if len(args) > 1 else ""
+    if target_folder_name:
+        logger.info(f"命令指定目标文件夹名称: {target_folder_name}")
+    else:
+        default_folder_id = os.getenv("TARGET_FOLDER_ID", "-11")
+        logger.info(f"命令未指定文件夹，使用默认文件夹 ID: {default_folder_id}")
+    
+    script_args = ["python", "/app/create_task.py", "--share-link", share_link]
+    if target_folder_name:
+        script_args.extend(["--target-folder-name", target_folder_name])
+    
+    await run_script(
+        "/app/create_task.py",
+        script_args,
+        chat_id,
+        context,
+        "转存",
+        count_transfer_files
+    )
+
+async def strm_command(update, context):
+    chat_id = update.message.chat_id
+    sender_username = update.message.from_user.username if update.message.from_user.username else "未知用户"
+    
+    if chat_id != int(TARGET_CHAT_ID) or sender_username != TARGET_SENDER:
+        logger.info(f"命令 /strm 不符合条件: Chat ID {chat_id} 或发送者 @{sender_username} 不匹配")
+        return
+    
+    logger.info(f"收到命令: /strm (来自: @{sender_username})")
+    await run_script(
+        "/app/init4.sh",
+        ["bash", "/app/init4.sh", SCRIPT_PARAM],
+        chat_id,
+        context,
+        "入库",
+        count_processing_files
+    )
+
+async def execute_command(update, context):
+    chat_id = update.message.chat_id
+    sender_username = update.message.from_user.username if update.message.from_user.username else "未知用户"
+    
+    if chat_id != int(TARGET_CHAT_ID) or sender_username != TARGET_SENDER:
+        logger.info(f"命令 /execute 不符合条件: Chat ID {chat_id} 或发送者 @{sender_username} 不匹配")
+        return
+    
+    logger.info(f"收到命令: /execute (来自: @{sender_username})")
+    await run_script(
+        "/app/execute_tasks.py",
+        ["python", "/app/execute_tasks.py"],
+        chat_id,
+        context,
+        "任务执行"
+    )
+
 def main():
     init_db()
     application = Application.builder().token(TOKEN).build()
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    
+    # 处理非命令的文本消息
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # 处理命令
+    application.add_handler(CommandHandler("transfer", transfer_command))
+    application.add_handler(CommandHandler("strm", strm_command))
+    application.add_handler(CommandHandler("execute", execute_command))
+    
     logger.info("机器人已启动，监听中...")
     application.run_polling(drop_pending_updates=True)
 
