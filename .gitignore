@@ -1,0 +1,6 @@
+data/
+.env
+1panel.env
+__pycache__/
+*.pyc
+*.tar

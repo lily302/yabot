@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  yabot:
+    image: leslie56912/yabot:latest  # 直接指定镜像
+    container_name: yabot
+    environment:
+      - TOKEN=${TOKEN}
+      - TARGET_CHAT_ID=${TARGET_CHAT_ID}
+      - TARGET_SENDER=${TARGET_SENDER}
+      - SCRIPT_PARAM=${SCRIPT_PARAM}
+      - SCRIPT_PATH_CREATE_TASK=${SCRIPT_PATH_CREATE_TASK}
+      - SCRIPT_PATH_EXECUTE_TASKS=${SCRIPT_PATH_EXECUTE_TASKS}
+      - DB_PATH=${DB_PATH}
+      - SERVER_URL=${SERVER_URL}
+      - USERNAME=${USERNAME}
+      - PASSWORD=${PASSWORD}
+      - TARGET_FOLDER_ID=${TARGET_FOLDER_ID}
+      - TZ=${TZ}
+    volumes:
+      - ./data:/app/data
+      - ${SCRIPT_PARAM}:/media
+      - ${SCRIPT_PARAM}/strm.txt:/strm.txt
+    network_mode: host
+    restart: unless-stopped
