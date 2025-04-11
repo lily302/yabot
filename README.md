@@ -15,6 +15,41 @@ Yabot 是一个用于管理媒体任务的 Telegram 机器人。它可以通过 
 
 ## 安装步骤
 
+### 方法 1：从 Docker Hub 拉取镜像（推荐）
+
+1. **拉取镜像**：
+   ```bash
+   docker pull leslie56912/yabot:latest
+   ```
+
+2. **创建 `.env` 文件**：
+   - 创建一个 `.env` 文件，填入您的 Telegram 机器人 Token 和其他设置。例如：
+     ```bash
+     echo "TOKEN=your-telegram-bot-token" > .env
+     echo "TARGET_CHAT_ID=your-chat-id" >> .env
+     echo "TARGET_SENDER=your-sender-id" >> .env
+     ```
+   - **注意**：请勿将 `.env` 文件上传到 GitHub，它包含敏感信息。
+
+3. **运行容器**：
+   ```bash
+   docker run -d --name yabot --env-file .env -v $(pwd)/data:/app/data leslie56912/yabot:latest
+   ```
+   - 这将启动 Yabot 容器，容器名为 `yabot`。
+   - `-v $(pwd)/data:/app/data` 将本地 `data` 目录挂载到容器内的 `/app/data`，用于持久化数据（根据您的项目需求调整）。
+
+4. **验证运行**：
+   - 检查容器是否正常运行：
+     ```bash
+     docker ps
+     ```
+   - 查看日志：
+     ```bash
+     docker logs yabot
+     ```
+
+### 方法 2：从源码构建
+
 1. **克隆仓库**：
    ```bash
    git clone https://github.com/lily302/yabot.git
@@ -38,7 +73,7 @@ Yabot 是一个用于管理媒体任务的 Telegram 机器人。它可以通过 
    ```bash
    docker-compose up -d
    ```
-   - 这将启动 Yabot 容器，容器名为 `yabot`。
+   - 这将构建并启动 Yabot 容器，容器名为 `yabot`。
 
 4. **验证运行**：
    - 检查容器是否正常运行：
