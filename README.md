@@ -109,7 +109,8 @@ docker logs yabot
 - `.env.example`：环境变量模板文件。
 
 ## 版本历史
-
+- **v1.0.2**（2025-04-11）：
+- 更新了 适配cloud189-auto-save:v2.2.9版本
 - **v1.0.1**（2025-04-11）：
 - 更新了 `create_task.py`，修复了文件夹匹配中的 `NameError` 错误。
 - 更新了 `yabot.py`，修复了 `/transfer` 命令未触发的问题。
