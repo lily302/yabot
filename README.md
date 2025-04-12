@@ -171,7 +171,8 @@ Yabot 是一个基于 Telegram 的媒体任务管理机器人，支持快速部�
 - `requirements.txt`：Python 依赖列表。
 
 ## 版本历史
-
+- **v1.0.4**（2025-04-13）：
+  - 优化了目录寻找逻辑，先从历史记录查询，其次我的转存目录，最后全局枚举。
 - **v1.0.3**（2025-04-13）：
   - 修复 `create_task.py` 中 `get_folder_name_by_id` 函数的无限循环问题。
   - 更新数据库路径为 `/app/data/messages.db`，确保数据持久化。
