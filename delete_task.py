@@ -105,4 +105,4 @@ def delete_task_by_id(session: requests.Session, task_id: str, delete_cloud: boo
         return True, ""
     except requests.exceptions.RequestException as e:
         logger.error("任务 %s 删除失败: %s", task_id, e)
-        return False, str(e)
+        return False, str(e)# Updated for v1.0.3

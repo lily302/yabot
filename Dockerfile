@@ -18,6 +18,7 @@ COPY execute_tasks.py .
 COPY create_task.py .
 COPY strm4.py .
 COPY init4.sh .
+COPY delete_task.py .
 
 RUN chmod +x /app/init4.sh
 

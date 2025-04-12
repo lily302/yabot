@@ -3,14 +3,36 @@ import time
 import argparse
 import os
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+def setup_logging():
+    log_dir = "/app/logs"
+    log_file = os.path.join(log_dir, "yabot.log")
+
+    # 确保日志目录存在
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception as e:
+        print(f"无法创建日志目录 {log_dir}: {e}")
+
+    # 尝试初始化 FileHandler
+    handlers = [logging.StreamHandler()]  # 默认使用标准输出
+    try:
+        file_handler = logging.FileHandler(log_file)
+        handlers.append(file_handler)
+    except Exception as e:
+        print(f"无法初始化日志文件 {log_file}: {e}")
+
+    # 配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=handlers
+    )
+
+# 初始化日志
+setup_logging()
 logger = logging.getLogger(__name__)
 
 def get_folder_tree(session: requests.Session, server_url: str, account_id: str, folder_id: str = "-11") -> List[dict]:
@@ -43,6 +65,80 @@ def flatten_folder_tree(session: requests.Session, server_url: str, account_id: 
         sub_folders = get_folder_tree(session, server_url, account_id, folder['id'])
         result.extend(flatten_folder_tree(session, server_url, account_id, sub_folders, path))
     return result
+
+def get_folder_name_by_id(session: requests.Session, server_url: str, account_id: str, folder_id: str, max_depth: int = 10) -> str:
+    """通过目录 ID 获取目录名称及其完整路径，从根目录向下递归查找"""
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Cache-Control": "no-cache"
+    }
+
+    # 存储路径
+    path_parts = []
+
+    # 递归查找目录信息
+    def find_folder_recursive(current_folder_id: str, target_folder_id: str, current_path: List[str], visited: set, depth: int = 0) -> Optional[List[str]]:
+        if depth >= max_depth:
+            logger.error("达到最大递归深度 (%d)，仍未找到目录 ID: %s", max_depth, target_folder_id)
+            return None
+
+        if current_folder_id in visited:
+            logger.error("检测到循环，目录 ID: %s 已访问", current_folder_id)
+            return None
+
+        visited.add(current_folder_id)
+        url = f"{server_url}/api/folders/{account_id}?folderId={current_folder_id}"
+        try:
+            response = session.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            logger.info("查询目录 API 响应 (folderId=%s): %s", current_folder_id, data)
+            if not data.get("success"):
+                logger.error("查询目录失败: %s", data.get("error", "未知错误"))
+                return None
+
+            folder_data = data.get("data", {})
+            if not folder_data:
+                logger.warning("目录数据为空 (folderId=%s)", current_folder_id)
+                return None
+
+            # 如果 folder_data 是列表（子目录列表）
+            if isinstance(folder_data, list):
+                for folder in folder_data:
+                    fid = str(folder.get("id"))
+                    fname = folder.get("name") or folder.get("folderName") or "未分类"
+                    if fid == target_folder_id:
+                        return current_path + [fname]
+                    # 递归查找子目录
+                    sub_path = find_folder_recursive(fid, target_folder_id, current_path + [fname], visited, depth + 1)
+                    if sub_path:
+                        return sub_path
+            # 如果 folder_data 是字典（可能是当前目录信息）
+            elif isinstance(folder_data, dict):
+                fid = str(folder_data.get("id"))
+                fname = folder_data.get("name") or folder_data.get("folderName") or "未分类"
+                if fid == target_folder_id:
+                    return current_path + [fname]
+            else:
+                logger.warning("folder_data 格式不正确: %s", folder_data)
+                return None
+        except requests.exceptions.RequestException as e:
+            logger.error("查询目录失败: %s", e)
+            return None
+        return None
+
+    # 从根目录开始查找
+    logger.info("开始从根目录查找目标目录 ID: %s", folder_id)
+    path = find_folder_recursive("-11", folder_id, [], set())
+    if not path:
+        logger.error("未找到目标目录 ID: %s", folder_id)
+        return "未分类"
+    
+    full_path = "/".join(path)
+    logger.info("找到目标目录路径: %s (ID: %s)", full_path, folder_id)
+    return full_path
 
 def match_folder_by_name(session: requests.Session, server_url: str, account_id: str, folder_name: str) -> Tuple[str, str]:
     """根据文件夹名称模糊匹配目标文件夹"""
@@ -85,8 +181,8 @@ def parse_share_folders(session: requests.Session, server_url: str, account_id: 
         logger.error("解析分享链接失败: %s", e)
         return []
 
-def login_and_create_task(share_link: str, access_code: str = "", target_folder_id: str = "", target_folder_name: str = "") -> tuple[bool, int]:
-    """登录并创建转存任务，返回 (成功状态, 转存文件总数)"""
+def login_and_create_task(share_link: str, access_code: str = "", target_folder_id: str = "", target_folder_name: str = "") -> tuple[bool, int, str, str]:
+    """登录并创建转存任务，返回 (成功状态, 转存文件总数, 目标目录 ID, 目标目录名称)"""
     session = requests.Session()
     headers = {
         "Accept": "*/*",
@@ -113,7 +209,7 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         logger.info("初始 Cookie 获取成功: %s", session.cookies.get_dict())
     except requests.exceptions.RequestException as e:
         logger.error("初始请求失败: %s", e)
-        return False, 0
+        return False, 0, "", ""
 
     # 步骤 2：登录
     logger.info("登录...")
@@ -124,7 +220,7 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         logger.info("登录成功: %s", response.json())
     except requests.exceptions.RequestException as e:
         logger.error("登录失败: %s", e)
-        return False, 0
+        return False, 0, "", ""
 
     # 步骤 3：获取账号列表
     logger.info("获取账号列表...")
@@ -135,36 +231,42 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         account_id = str(accounts.get("data", [{}])[0].get("id")) if accounts.get("data") else None
         if not account_id:
             logger.error("未找到有效的账号 ID")
-            return False, 0
+            return False, 0, "", ""
         logger.info("使用账号 ID: %s", account_id)
     except requests.exceptions.RequestException as e:
         logger.error("获取账号列表失败: %s", e)
-        return False, 0
+        return False, 0, "", ""
 
     # 步骤 4：解析分享链接获取文件夹列表
     logger.info("解析分享链接...")
     share_folders = parse_share_folders(session, server_url, account_id, share_link, access_code)
     if not share_folders:
         logger.error("未获取到分享文件夹")
-        return False, 0
+        return False, 0, "", ""
     logger.info("分享文件夹: %s", share_folders)
 
     # 步骤 5：确定目标文件夹
-    target_folder = ""
+    final_target_folder_id = ""
+    final_target_folder_name = ""
     if target_folder_id:
         logger.info("使用指定目标文件夹 ID: %s", target_folder_id)
+        final_target_folder_id = target_folder_id
+        # 查询目标目录名称
+        final_target_folder_name = get_folder_name_by_id(session, server_url, account_id, target_folder_id)
     elif target_folder_name:
         folder_path, matched_folder_id = match_folder_by_name(session, server_url, account_id, target_folder_name)
         if matched_folder_id:
-            target_folder_id = matched_folder_id
-            target_folder = folder_path
-            logger.info("使用匹配文件夹: %s (ID: %s)", folder_path, target_folder_id)
+            final_target_folder_id = matched_folder_id
+            final_target_folder_name = folder_path
+            logger.info("使用匹配文件夹: %s (ID: %s)", folder_path, final_target_folder_id)
         else:
             logger.warning("未找到匹配 '%s' 的文件夹，使用默认文件夹 ID: %s", target_folder_name, default_folder_id)
-            target_folder_id = default_folder_id
+            final_target_folder_id = default_folder_id
+            final_target_folder_name = get_folder_name_by_id(session, server_url, account_id, default_folder_id)
     else:
         logger.info("未指定文件夹，使用默认文件夹 ID: %s", default_folder_id)
-        target_folder_id = default_folder_id
+        final_target_folder_id = default_folder_id
+        final_target_folder_name = get_folder_name_by_id(session, server_url, account_id, default_folder_id)
 
     # 步骤 6：创建任务
     logger.info("创建任务...")
@@ -180,8 +282,8 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         "matchValue": "",
         "overwriteFolder": 1,
         "remark": "",
-        "targetFolderId": target_folder_id,
-        "targetFolder": target_folder,
+        "targetFolderId": final_target_folder_id,
+        "targetFolder": final_target_folder_name,
         "selectedFolders": share_folders
     }
     try:
@@ -190,15 +292,15 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         result = response.json()
         if not result.get("success"):
             logger.error("任务创建失败: %s", result.get("error"))
-            return False, 0
+            return False, 0, final_target_folder_id, final_target_folder_name
         task_ids = [str(task.get("id")) for task in result.get("data", [])]
         if not task_ids:
             logger.error("未找到任务 ID")
-            return False, 0
+            return False, 0, final_target_folder_id, final_target_folder_name
         logger.info("任务创建成功，任务 ID: %s", task_ids)
     except requests.exceptions.RequestException as e:
         logger.error("任务创建失败: %s", e)
-        return False, 0
+        return False, 0, final_target_folder_id, final_target_folder_name
 
     # 步骤 7：执行任务
     logger.info("执行任务 %s...", task_ids)
@@ -274,7 +376,7 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         logger.info("任务 %s 最终转存文件数: %d", task_id, task_transferred_files)
 
     logger.info("所有任务总计转存文件数: %d", total_transferred_files)
-    return all_success, total_transferred_files
+    return all_success, total_transferred_files, final_target_folder_id, final_target_folder_name
 
 def main():
     parser = argparse.ArgumentParser(description="创建天翼云盘转存任务，支持自定义目录")
@@ -304,9 +406,13 @@ def main():
     retry_delay = 5
     for attempt in range(max_retries):
         logger.info("尝试第 %s 次...", attempt + 1)
-        success, transferred_files = login_and_create_task(share_link, access_code, target_folder_id, target_folder_name)
+        success, transferred_files, final_target_folder_id, final_target_folder_name = login_and_create_task(
+            share_link, access_code, target_folder_id, target_folder_name
+        )
         if success:
             logger.info("脚本执行成功！总计转存文件数: %d", transferred_files)
+            # 输出目标目录信息，便于调试
+            logger.info("最终目标目录: %s (ID: %s)", final_target_folder_name, final_target_folder_id)
             break
         else:
             if attempt < max_retries - 1:
