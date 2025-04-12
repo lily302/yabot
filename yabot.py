@@ -1,3 +1,9 @@
+# yabot.py
+# Version: 1.0.4
+# Changelog:
+# - Added persistent logging to /app/logs/yabot.log
+# - Optimized history storage for compatibility with create_task.py
+# - Improved logging readability
 import sqlite3
 import telegram
 import requests
@@ -17,22 +23,40 @@ import os
 import time
 import re
 from typing import List, Dict, Tuple
-from collections import Counter  # 引入 Counter 用于统计目录使用次数
+from collections import Counter
 from delete_task import login_and_get_tasks, delete_task_by_id
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+def setup_logging():
+    log_dir = "/app/logs"
+    log_file = os.path.join(log_dir, "yabot.log")
+
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception as e:
+        print(f"无法创建日志目录 {log_dir}: {e}")
+
+    handlers = [logging.StreamHandler()]
+    try:
+        file_handler = logging.FileHandler(log_file)
+        handlers.append(file_handler)
+    except Exception as e:
+        print(f"无法初始化日志文件 {log_file}: {e}")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=handlers
+    )
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # 从环境变量读取配置
 TOKEN = os.getenv("TOKEN")
 TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID")
 TARGET_SENDER = os.getenv("TARGET_SENDER")
-DB_PATH = os.getenv("DB_PATH", "/app/messages.db")
+DB_PATH = os.getenv("DB_PATH", "/app/data/messages.db")
 SCRIPT_PARAM = os.getenv("SCRIPT_PARAM", "")
 SERVER_URL = os.getenv("SERVER_URL", "http://your-server:3000").rstrip('/')
 USERNAME = os.getenv("USERNAME", "your_username")
@@ -40,8 +64,8 @@ PASSWORD = os.getenv("PASSWORD", "your_password")
 DEFAULT_FOLDER_ID = os.getenv("TARGET_FOLDER_ID", "-11")
 
 # 全局变量存储用户选择的默认目录
-USER_DEFAULT_FOLDER_ID = DEFAULT_FOLDER_ID  # 初始值为环境变量中的默认值
-USER_DEFAULT_FOLDER_PATH = ""  # 存储默认目录的路径（用于显示）
+USER_DEFAULT_FOLDER_ID = DEFAULT_FOLDER_ID
+USER_DEFAULT_FOLDER_PATH = ""
 
 # 触发关键词
 TRIGGER_MESSAGE_STRM = "入库"
@@ -63,19 +87,16 @@ def init_db():
     """初始化 SQLite 数据库"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # 修改 messages 表，添加 target_folder_id 和 target_folder_name 列
     c.execute('''CREATE TABLE IF NOT EXISTS messages 
                  (id INTEGER PRIMARY KEY, 
                   sender TEXT, 
                   content TEXT, 
                   timestamp TEXT,
-                  target_folder_id TEXT,  -- 新增列：目标目录 ID
-                  target_folder_name TEXT -- 新增列：目标目录名称
+                  target_folder_id TEXT,
+                  target_folder_name TEXT
                  )''')
-    # 创建 settings 表，用于存储默认目录
     c.execute('''CREATE TABLE IF NOT EXISTS settings 
                  (key TEXT PRIMARY KEY, value TEXT)''')
-    # 初始化默认目录（如果表中没有记录）
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", 
               ("default_folder_id", DEFAULT_FOLDER_ID))
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", 
@@ -97,7 +118,7 @@ def load_default_folder():
     if result:
         USER_DEFAULT_FOLDER_PATH = result[0]
     conn.close()
-    logger.info("从数据库加载默认目录: %s (ID: %s)", USER_DEFAULT_FOLDER_PATH, USER_DEFAULT_FOLDER_ID)
+    logger.info("从数据库加载默认目录: %s (ID: %s)", USER_DEFAULT_FOLDER_PATH or "未设置", USER_DEFAULT_FOLDER_ID)
 
 def save_default_folder(folder_id: str, folder_path: str):
     """保存默认目录到数据库"""
@@ -125,7 +146,7 @@ def save_to_db(sender: str, content: str, target_folder_id: str = None, target_f
     )
     conn.commit()
     conn.close()
-    logger.info("消息已保存到数据库: %s (发送者: %s, 目标目录: %s)", content, sender, target_folder_name)
+    logger.info("消息已保存到数据库: %s (发送者: %s, 目标目录: %s)", content, sender, target_folder_name or "未指定")
 
 def extract_share_link(message_text: str) -> str:
     """从消息中提取天翼云盘分享链接"""
@@ -178,11 +199,9 @@ async def run_script(script_path: str, script_args: list, chat_id: int, context:
         target_folder_id = ""
         target_folder_name = ""
         if "create_task.py" in script_path:
-            # 提取转存文件数
             match = re.search(r"所有任务总计转存文件数: (\d+)", output)
             if match:
                 count = int(match.group(1))
-            # 提取目标目录信息
             folder_match = re.search(r"最终目标目录: (.+) \(ID: (.+)\)", output)
             if folder_match:
                 target_folder_name = folder_match.group(1)
@@ -234,13 +253,11 @@ async def run_script(script_path: str, script_args: list, chat_id: int, context:
         await send_limited_message(chat_id, feedback, context)
         return False, 0, "", "", ""
 
-# 获取常用目录的函数（基于历史记录）
 def get_common_folders(session: requests.Session) -> List[Tuple[str, str]]:
     """从历史转存记录中提取前 10 个最常用目录"""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # 从 messages 表中获取所有转存任务的目标目录
         c.execute("SELECT target_folder_id, target_folder_name FROM messages WHERE target_folder_id IS NOT NULL AND target_folder_name IS NOT NULL")
         folder_records = c.fetchall()
         conn.close()
@@ -252,12 +269,8 @@ def get_common_folders(session: requests.Session) -> List[Tuple[str, str]]:
         logger.info("没有历史转存记录，返回空列表")
         return []
 
-    # 统计每个目录的使用次数
     folder_counts = Counter((folder_id, folder_name) for folder_id, folder_name in folder_records)
-    
-    # 按使用次数降序排序，取前 10 个
     common_folders = [(name, folder_id) for (folder_id, name), count in folder_counts.most_common(10)]
-    
     logger.info("常用目录（基于历史记录）: %s", common_folders)
     return common_folders
 
@@ -299,18 +312,16 @@ async def handle_message(update: telegram.Update, context: telegram.ext.ContextT
             logger.info("指定目标文件夹名称: %s", target_folder_name)
             script_args = ["python", "/app/create_task.py", "--share-link", share_link, "--target-folder-name", target_folder_name]
         else:
-            # 获取常用目录（基于历史记录）
             common_folders = get_common_folders(session=requests.Session())
             if not common_folders:
                 logger.info("没有历史常用目录，使用默认目录 ID: %s", USER_DEFAULT_FOLDER_ID)
                 target_folder_id = USER_DEFAULT_FOLDER_ID
                 script_args = ["python", "/app/create_task.py", "--share-link", share_link, "--target-folder-id", target_folder_id]
             else:
-                _, target_folder_id = common_folders[0]  # 选择使用次数最多的目录
+                _, target_folder_id = common_folders[0]
                 logger.info("未指定文件夹，使用历史常用目录 ID: %s", target_folder_id)
                 script_args = ["python", "/app/create_task.py", "--share-link", share_link, "--target-folder-id", target_folder_id]
 
-        # 执行转存任务
         success, count, output, final_target_folder_id, final_target_folder_name = await run_script(
             "/app/create_task.py",
             script_args,
@@ -318,7 +329,6 @@ async def handle_message(update: telegram.Update, context: telegram.ext.ContextT
             context,
             "转存"
         )
-        # 记录目标目录到历史
         if success and final_target_folder_id and final_target_folder_name:
             save_to_db(sender_username, message_text, final_target_folder_id, final_target_folder_name)
         else:
@@ -369,18 +379,16 @@ async def save_command(update: telegram.Update, context: telegram.ext.ContextTyp
         logger.info("命令指定目标文件夹名称: %s", target_folder_name)
         script_args = ["python", "/app/create_task.py", "--share-link", share_link, "--target-folder-name", target_folder_name]
     else:
-        # 获取常用目录（基于历史记录）
         common_folders = get_common_folders(session=requests.Session())
         if not common_folders:
             logger.info("命令未指定文件夹，且没有历史常用目录，使用默认目录 ID: %s", USER_DEFAULT_FOLDER_ID)
             target_folder_id = USER_DEFAULT_FOLDER_ID
             script_args = ["python", "/app/create_task.py", "--share-link", share_link, "--target-folder-id", target_folder_id]
         else:
-            _, target_folder_id = common_folders[0]  # 选择使用次数最多的目录
+            _, target_folder_id = common_folders[0]
             logger.info("命令未指定文件夹，使用历史常用目录 ID: %s", target_folder_id)
             script_args = ["python", "/app/create_task.py", "--share-link", share_link, "--target-folder-id", target_folder_id]
     
-    # 执行转存任务
     success, count, output, final_target_folder_id, final_target_folder_name = await run_script(
         "/app/create_task.py",
         script_args,
@@ -388,7 +396,6 @@ async def save_command(update: telegram.Update, context: telegram.ext.ContextTyp
         context,
         "转存"
     )
-    # 记录目标目录到历史
     if success and final_target_folder_id and final_target_folder_name:
         save_to_db(sender_username, " ".join(args), final_target_folder_id, final_target_folder_name)
     else:
@@ -432,7 +439,6 @@ async def execute_command(update: telegram.Update, context: telegram.ext.Context
     )
     save_to_db(sender_username, "/execute")
 
-# 交互式删除功能的实现
 def build_task_list_message(tasks: List[Dict], page: int, tasks_per_page: int, selected_tasks: set) -> tuple[str, InlineKeyboardMarkup]:
     """构建任务列表消息和按钮"""
     total_tasks = len(tasks)
@@ -537,7 +543,6 @@ async def delete_command(update: telegram.Update, context: telegram.ext.ContextT
     logger.info("进入 SELECT_TASKS 状态，等待用户选择任务")
     return SELECT_TASKS
 
-# 常用目录查看与选择功能
 def build_folder_list_message(folders: List[Tuple[str, str]], page: int, folders_per_page: int, current_default: str) -> tuple[str, InlineKeyboardMarkup]:
     """构建文件夹列表消息和按钮"""
     total_folders = len(folders)
@@ -591,14 +596,12 @@ async def common_folders_command(update: telegram.Update, context: telegram.ext.
 
     logger.info("收到命令: /commonfolders (来自: @%s)", sender_username)
 
-    # 步骤 1：获取常用目录（基于历史记录）
     session = requests.Session()
     common_folders = get_common_folders(session)
     if not common_folders:
         await send_limited_message(chat_id, "❌ 没有历史转存记录，无法获取常用目录", context)
         return ConversationHandler.END
 
-    # 步骤 2：初始化状态并展示文件夹列表
     page = 0
     context.user_data["common_folders"] = common_folders
     context.user_data["folder_page"] = page
@@ -622,7 +625,6 @@ async def button_handler(update: telegram.Update, context: telegram.ext.ContextT
     chat_id = query.message.chat_id
     message_id = query.message.message_id
 
-    # 处理删除任务的按钮
     if "tasks" in context.user_data:
         tasks = context.user_data.get("tasks", [])
         session = context.user_data.get("session")
@@ -673,7 +675,6 @@ async def button_handler(update: telegram.Update, context: telegram.ext.ContextT
         await query.edit_message_text(text=task_list_message, reply_markup=reply_markup)
         return SELECT_TASKS
 
-    # 处理常用目录的按钮
     elif "common_folders" in context.user_data:
         common_folders = context.user_data.get("common_folders", [])
         page = context.user_data.get("folder_page", 0)
@@ -749,10 +750,9 @@ async def timeout(update: telegram.Update, context: telegram.ext.ContextTypes.DE
 def main():
     """主函数，启动 Telegram 机器人"""
     init_db()
-    load_default_folder()  # 启动时加载默认目录
+    load_default_folder()
     application = Application.builder().token(TOKEN).build()
 
-    # 交互式对话（支持删除和查看常用目录）
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("delete", delete_command),

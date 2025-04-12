@@ -3,6 +3,7 @@ import time
 import argparse
 import os
 import logging
+import sqlite3
 from typing import List, Tuple, Optional
 
 # 配置日志
@@ -10,30 +11,44 @@ def setup_logging():
     log_dir = "/app/logs"
     log_file = os.path.join(log_dir, "yabot.log")
 
-    # 确保日志目录存在
     try:
         os.makedirs(log_dir, exist_ok=True)
     except Exception as e:
         print(f"无法创建日志目录 {log_dir}: {e}")
 
-    # 尝试初始化 FileHandler
-    handlers = [logging.StreamHandler()]  # 默认使用标准输出
+    handlers = [logging.StreamHandler()]
     try:
         file_handler = logging.FileHandler(log_file)
         handlers.append(file_handler)
     except Exception as e:
         print(f"无法初始化日志文件 {log_file}: {e}")
 
-    # 配置日志
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=handlers
     )
 
-# 初始化日志
 setup_logging()
 logger = logging.getLogger(__name__)
+
+# 数据库路径（与 yabot.py 保持一致）
+DB_PATH = os.getenv("DB_PATH", "/app/data/messages.db")
+
+def init_db():
+    """初始化数据库，创建 root_folders 表"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS root_folders (
+            name TEXT NOT NULL,
+            folder_id TEXT NOT NULL,
+            parent_id TEXT NOT NULL,
+            PRIMARY KEY (folder_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
 
 def get_folder_tree(session: requests.Session, server_url: str, account_id: str, folder_id: str = "-11") -> List[dict]:
     """获取账号的目录树"""
@@ -66,8 +81,63 @@ def flatten_folder_tree(session: requests.Session, server_url: str, account_id: 
         result.extend(flatten_folder_tree(session, server_url, account_id, sub_folders, path))
     return result
 
+def save_root_folders(session: requests.Session, server_url: str, account_id: str):
+    """保存根目录信息到数据库"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM root_folders WHERE parent_id = '-11'")
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return
+    
+    logger.info("查询根目录 API 响应 (folderId=-11)")
+    folders = get_folder_tree(session, server_url, account_id, folder_id="-11")
+    for folder in folders:
+        name = folder['name']
+        folder_id = folder['id']
+        parent_id = folder['pId']
+        cursor.execute(
+            "INSERT OR REPLACE INTO root_folders (name, folder_id, parent_id) VALUES (?, ?, ?)",
+            (name, folder_id, parent_id)
+        )
+        logger.info(f"保存根目录: {name} (ID: {folder_id})")
+    conn.commit()
+    conn.close()
+
+def get_my_transfers_folder_id():
+    """从数据库获取 '我的转存' 的 folder_id"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT folder_id FROM root_folders WHERE name = '我的转存' AND parent_id = '-11'"
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def get_folder_from_history(target_folder_id: str) -> Optional[str]:
+    """从历史记录中获取目标目录路径"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT target_folder_name FROM messages WHERE target_folder_id = ? LIMIT 1",
+        (target_folder_id,)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        folder_path = result[0]
+        logger.info(f"直接从历史记录获取目标目录: {folder_path} (ID: {target_folder_id})")
+        return folder_path
+    return None
+
+def update_history_folder(folder_path: str, folder_id: str):
+    """更新历史记录（messages 表已通过 save_to_db 更新，这里无需额外操作）"""
+    pass  # yabot.py 的 save_to_db 已记录历史，无需重复
+
 def get_folder_name_by_id(session: requests.Session, server_url: str, account_id: str, folder_id: str, max_depth: int = 10) -> str:
-    """通过目录 ID 获取目录名称及其完整路径，从根目录向下递归查找"""
+    """通过目录 ID 获取目录名称及其完整路径，优化查找逻辑"""
     headers = {
         "Accept": "*/*",
         "Content-Type": "application/json",
@@ -75,10 +145,20 @@ def get_folder_name_by_id(session: requests.Session, server_url: str, account_id
         "Cache-Control": "no-cache"
     }
 
-    # 存储路径
-    path_parts = []
+    # 步骤 1：优先从历史记录中查找
+    folder_path = get_folder_from_history(folder_id)
+    if folder_path:
+        return folder_path
 
-    # 递归查找目录信息
+    # 步骤 2：从 '我的转存' 开始查找
+    my_transfers_id = get_my_transfers_folder_id()
+    if not my_transfers_id:
+        logger.info("未找到 '我的转存' 目录，保存根目录信息")
+        save_root_folders(session, server_url, account_id)
+        my_transfers_id = get_my_transfers_folder_id()
+        if not my_transfers_id:
+            logger.warning("仍未找到 '我的转存' 目录，fallback 到根目录查找")
+
     def find_folder_recursive(current_folder_id: str, target_folder_id: str, current_path: List[str], visited: set, depth: int = 0) -> Optional[List[str]]:
         if depth >= max_depth:
             logger.error("达到最大递归深度 (%d)，仍未找到目录 ID: %s", max_depth, target_folder_id)
@@ -104,18 +184,15 @@ def get_folder_name_by_id(session: requests.Session, server_url: str, account_id
                 logger.warning("目录数据为空 (folderId=%s)", current_folder_id)
                 return None
 
-            # 如果 folder_data 是列表（子目录列表）
             if isinstance(folder_data, list):
                 for folder in folder_data:
                     fid = str(folder.get("id"))
                     fname = folder.get("name") or folder.get("folderName") or "未分类"
                     if fid == target_folder_id:
                         return current_path + [fname]
-                    # 递归查找子目录
                     sub_path = find_folder_recursive(fid, target_folder_id, current_path + [fname], visited, depth + 1)
                     if sub_path:
                         return sub_path
-            # 如果 folder_data 是字典（可能是当前目录信息）
             elif isinstance(folder_data, dict):
                 fid = str(folder_data.get("id"))
                 fname = folder_data.get("name") or folder_data.get("folderName") or "未分类"
@@ -129,15 +206,24 @@ def get_folder_name_by_id(session: requests.Session, server_url: str, account_id
             return None
         return None
 
-    # 从根目录开始查找
-    logger.info("开始从根目录查找目标目录 ID: %s", folder_id)
-    path = find_folder_recursive("-11", folder_id, [], set())
+    # 从 '我的转存' 开始查找
+    path = None
+    if my_transfers_id:
+        logger.info("从 '我的转存' (ID: %s) 开始查找目标目录 ID: %s", my_transfers_id, folder_id)
+        path = find_folder_recursive(my_transfers_id, folder_id, ["我的转存"], set())
+    
+    # 如果未找到，fallback 到根目录查找
+    if not path:
+        logger.info("在 '我的转存' 中未找到目标目录，fallback 到根目录查找目标目录 ID: %s", folder_id)
+        path = find_folder_recursive("-11", folder_id, [], set())
+    
     if not path:
         logger.error("未找到目标目录 ID: %s", folder_id)
         return "未分类"
     
     full_path = "/".join(path)
     logger.info("找到目标目录路径: %s (ID: %s)", full_path, folder_id)
+    # 更新历史记录（由 yabot.py 的 save_to_db 负责）
     return full_path
 
 def match_folder_by_name(session: requests.Session, server_url: str, account_id: str, folder_name: str) -> Tuple[str, str]:
@@ -191,7 +277,6 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         "Cache-Control": "no-cache"
     }
 
-    # 从环境变量读取配置
     server_url = os.getenv("SERVER_URL", "http://your-server:3000").rstrip('/')
     login_url = f"{server_url}/api/auth/login"
     accounts_url = f"{server_url}/api/accounts"
@@ -201,7 +286,6 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
     password = os.getenv("PASSWORD", "your_password")
     default_folder_id = os.getenv("TARGET_FOLDER_ID", "-11")
 
-    # 步骤 1：获取初始 Cookie
     logger.info("获取初始 Cookie...")
     try:
         response = session.get(server_url, headers=headers, timeout=10)
@@ -211,7 +295,6 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         logger.error("初始请求失败: %s", e)
         return False, 0, "", ""
 
-    # 步骤 2：登录
     logger.info("登录...")
     login_data = {"username": username, "password": password}
     try:
@@ -222,7 +305,6 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         logger.error("登录失败: %s", e)
         return False, 0, "", ""
 
-    # 步骤 3：获取账号列表
     logger.info("获取账号列表...")
     try:
         response = session.get(accounts_url, headers=headers, timeout=10)
@@ -237,7 +319,6 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         logger.error("获取账号列表失败: %s", e)
         return False, 0, "", ""
 
-    # 步骤 4：解析分享链接获取文件夹列表
     logger.info("解析分享链接...")
     share_folders = parse_share_folders(session, server_url, account_id, share_link, access_code)
     if not share_folders:
@@ -245,13 +326,11 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         return False, 0, "", ""
     logger.info("分享文件夹: %s", share_folders)
 
-    # 步骤 5：确定目标文件夹
     final_target_folder_id = ""
     final_target_folder_name = ""
     if target_folder_id:
         logger.info("使用指定目标文件夹 ID: %s", target_folder_id)
         final_target_folder_id = target_folder_id
-        # 查询目标目录名称
         final_target_folder_name = get_folder_name_by_id(session, server_url, account_id, target_folder_id)
     elif target_folder_name:
         folder_path, matched_folder_id = match_folder_by_name(session, server_url, account_id, target_folder_name)
@@ -268,7 +347,6 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         final_target_folder_id = default_folder_id
         final_target_folder_name = get_folder_name_by_id(session, server_url, account_id, default_folder_id)
 
-    # 步骤 6：创建任务
     logger.info("创建任务...")
     task_data = {
         "accountId": account_id,
@@ -302,7 +380,6 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
         logger.error("任务创建失败: %s", e)
         return False, 0, final_target_folder_id, final_target_folder_name
 
-    # 步骤 7：执行任务
     logger.info("执行任务 %s...", task_ids)
     for task_id in task_ids:
         execute_task_url = f"{server_url}/api/tasks/{task_id}/execute"
@@ -318,15 +395,14 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
             logger.error("任务 %s 执行失败: %s", task_id, e)
             continue
 
-    # 步骤 8：检查任务状态并统计转存文件数量
     logger.info("检查任务状态...")
     max_wait_attempts = 10
     wait_interval = 10
     all_success = True
-    total_transferred_files = 0  # 统计所有任务的转存文件总数
+    total_transferred_files = 0
 
     for task_id in task_ids:
-        task_transferred_files = 0  # 当前任务的转存文件数
+        task_transferred_files = 0
         for attempt in range(max_wait_attempts):
             try:
                 response = session.get(tasks_url, headers=headers, timeout=10)
@@ -347,17 +423,17 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
                             break
                         if current_episodes > 0 and last_error is None:
                             logger.info("任务 %s 文件已转存，视为成功，无需继续检查", task_id)
-                            task_transferred_files = current_episodes  # 记录转存文件数
-                            break  # 文件已转存成功，立即退出状态检查
+                            task_transferred_files = current_episodes
+                            break
                         if task_status in ["completed", "failed"]:
-                            task_transferred_files = current_episodes  # 记录最终文件数
+                            task_transferred_files = current_episodes
                             break
                 if last_error or task_status == "failed":
                     all_success = False
                     break
                 if current_episodes > 0 and last_error is None:
                     task_transferred_files = current_episodes
-                    break  # 确保在找到已转存文件后退出循环
+                    break
                 if task_status == "completed":
                     logger.info("任务 %s 已完成", task_id)
                     task_transferred_files = current_episodes
@@ -370,15 +446,16 @@ def login_and_create_task(share_link: str, access_code: str = "", target_folder_
                 break
         else:
             logger.warning("任务 %s 未能在预期时间内完成，但可能已转存", task_id)
-            task_transferred_files = current_episodes  # 记录最后一次检查的文件数
+            task_transferred_files = current_episodes
 
-        total_transferred_files += task_transferred_files  # 累加到总数
+        total_transferred_files += task_transferred_files
         logger.info("任务 %s 最终转存文件数: %d", task_id, task_transferred_files)
 
     logger.info("所有任务总计转存文件数: %d", total_transferred_files)
     return all_success, total_transferred_files, final_target_folder_id, final_target_folder_name
 
 def main():
+    init_db()  # 初始化数据库
     parser = argparse.ArgumentParser(description="创建天翼云盘转存任务，支持自定义目录")
     parser.add_argument("--share-link", required=True, help="天翼云盘分享链接（必填）")
     parser.add_argument("--access-code", default="", help="分享链接的访问密码（可选）")
@@ -411,7 +488,6 @@ def main():
         )
         if success:
             logger.info("脚本执行成功！总计转存文件数: %d", transferred_files)
-            # 输出目标目录信息，便于调试
             logger.info("最终目标目录: %s (ID: %s)", final_target_folder_name, final_target_folder_id)
             break
         else:

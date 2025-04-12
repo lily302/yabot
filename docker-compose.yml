@@ -19,6 +19,7 @@ services:
       - TZ=${TZ}
     volumes:
       - ./data:/app/data
+      - ./logs:/app/logs
       - ${SCRIPT_PARAM}:/media
       - ${SCRIPT_PARAM}/strm.txt:/strm.txt
     network_mode: host

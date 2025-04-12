@@ -43,13 +43,22 @@ Yabot 是一个基于 Telegram 的媒体任务管理机器人，支持快速部�
 
 3. **运行容器**：
    ```bash
-   docker run -d --name yabot --env-file .env -v $(pwd)/data:/app/data -v /path/to/your/storage:/mnt/nvme0n1-4/xiaoya_emby/xiaoya leslie56912/yabot:latest
+   docker run -d \
+   --name yabot \
+   --network host \
+   --restart unless-stopped \
+   --env-file .env \
+   -v $(pwd)/data:/app/data \
+   -v $(pwd)/logs:/app/logs \
+   -v <your-media-path>:/media \
+   -v <your-media-path>/strm.txt:/strm.txt \
+   leslie56912/yabot:latest
    ```
    - 命令说明：
      - `--name yabot`：容器名称。
      - `-v $(pwd)/data:/app/data`：将本地 `data` 目录挂载到容器，用于数据持久化。
-     - `-v /path/to/your/storage:/mnt/nvme0n1-4/xiaoya_emby/xiaoya`：挂载 STRM 文件目录（根据实际路径替换）。
-
+     - `-v <your-media-path>:/media`：挂载 STRM 文件目录（根据实际路径替换，同SCRIPT_PARAM）。
+     - `-v <your-media-path>/strm.txt:/strm.txt`：挂载 strm.txt（同SCRIPT_PARAM）。
 4. **验证运行**：
    - 检查容器状态：
      ```bash
